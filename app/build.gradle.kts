@@ -16,6 +16,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // gradle assembleDebug -PcopiaTeste: instala lado a lado com o app de verdade, com dados separados
+            if (project.hasProperty("copiaTeste")) applicationIdSuffix = ".teste"
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(

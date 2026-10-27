@@ -37,6 +37,10 @@ fun AppRoot(
     val screen by viewModel.screen.collectAsStateWithLifecycle()
     val entries by viewModel.entries.collectAsStateWithLifecycle()
     val query by viewModel.query.collectAsStateWithLifecycle()
+    val recoveryStep by viewModel.recoveryStep.collectAsStateWithLifecycle()
+    val hasRecoveryKey by viewModel.hasRecoveryKey.collectAsStateWithLifecycle()
+    val settingsDialog by viewModel.settingsDialog.collectAsStateWithLifecycle()
+    val dialogError by viewModel.dialogError.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(Unit) {
@@ -56,12 +60,21 @@ fun AppRoot(
 
     when (lockState) {
         LockState.NeedsSetup, LockState.Locked -> LockScreen(
-            isSetup = lockState == LockState.NeedsSetup,
+            mode = when {
+                lockState == LockState.NeedsSetup -> LockMode.Setup
+                recoveryStep == RecoveryStep.AskKeyword -> LockMode.Recovery
+                recoveryStep == RecoveryStep.NewPin -> LockMode.NewPin
+                else -> LockMode.Unlock
+            },
             error = pinError,
             biometricAvailable = biometricAvailable,
             onCreatePin = viewModel::createPin,
             onUnlock = viewModel::unlockWithPin,
             onBiometric = onBiometric,
+            onForgotPin = viewModel::startRecovery,
+            onVerifyKeyword = viewModel::verifyRecoveryKey,
+            onResetPin = viewModel::resetPin,
+            onCancelRecovery = viewModel::cancelRecovery,
         )
 
         LockState.Unlocked -> when (val current = screen) {
@@ -83,7 +96,7 @@ fun AppRoot(
                     viewModel.expectExternalActivity()
                     importLauncher.launch(arrayOf("application/json", "application/octet-stream", "text/plain"))
                 },
-                onLock = viewModel::lock,
+                onOpenSettings = viewModel::openSettings,
             )
 
             is Screen.Editor -> EditScreen(
@@ -91,6 +104,19 @@ fun AppRoot(
                 snackbarHostState = snackbarHostState,
                 onSave = { viewModel.save(current.draft) },
                 onBack = viewModel::closeEditor,
+            )
+
+            Screen.Settings -> SettingsScreen(
+                hasRecoveryKey = hasRecoveryKey,
+                dialog = settingsDialog,
+                dialogError = dialogError,
+                snackbarHostState = snackbarHostState,
+                onBack = viewModel::closeSettings,
+                onLockNow = viewModel::lock,
+                onOpenDialog = viewModel::openSettingsDialog,
+                onCloseDialog = viewModel::closeSettingsDialog,
+                onChangePin = viewModel::changePin,
+                onChangeKeyword = viewModel::changeRecoveryKey,
             )
         }
     }

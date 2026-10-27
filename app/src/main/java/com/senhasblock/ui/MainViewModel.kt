@@ -41,6 +41,11 @@ import java.util.Locale
 
 enum class LockState { NeedsSetup, Locked, Unlocked }
 
+/** Etapas do "Esqueci meu PIN": confirmar a palavra-chave e depois criar o PIN novo. */
+enum class RecoveryStep { None, AskKeyword, NewPin }
+
+enum class SettingsDialog { ChangePin, ChangeKeyword }
+
 /** Rascunho do formulário; fica no ViewModel para sobreviver à rotação da tela. */
 class EditorDraft(val original: PasswordEntry?) {
     var name by mutableStateOf(original?.name.orEmpty())
@@ -52,6 +57,7 @@ class EditorDraft(val original: PasswordEntry?) {
 sealed interface Screen {
     data object List : Screen
     data class Editor(val draft: EditorDraft) : Screen
+    data object Settings : Screen
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -67,6 +73,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _pinError = MutableStateFlow<String?>(null)
     val pinError: StateFlow<String?> = _pinError.asStateFlow()
+
+    private val _recoveryStep = MutableStateFlow(RecoveryStep.None)
+    val recoveryStep: StateFlow<RecoveryStep> = _recoveryStep.asStateFlow()
+
+    private val _hasRecoveryKey = MutableStateFlow(pinManager.hasRecoveryKey())
+    val hasRecoveryKey: StateFlow<Boolean> = _hasRecoveryKey.asStateFlow()
+
+    private val _settingsDialog = MutableStateFlow<SettingsDialog?>(null)
+    val settingsDialog: StateFlow<SettingsDialog?> = _settingsDialog.asStateFlow()
+
+    private val _dialogError = MutableStateFlow<String?>(null)
+    val dialogError: StateFlow<String?> = _dialogError.asStateFlow()
 
     private val _screen = MutableStateFlow<Screen>(Screen.List)
     val screen: StateFlow<Screen> = _screen.asStateFlow()
@@ -97,46 +115,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Trava ----
 
-    fun createPin(pin: String, confirm: String) {
-        when {
-            pin.length !in 4..8 -> _pinError.value = "O PIN deve ter de 4 a 8 dígitos"
-            pin != confirm -> _pinError.value = "Os PINs não conferem"
-            else -> viewModelScope.launch {
-                withContext(Dispatchers.Default) { pinManager.setPin(pin) }
-                unlock()
-            }
-        }
-    }
-
-    fun unlockWithPin(pin: String) {
-        val now = SystemClock.elapsedRealtime()
-        if (now < lockoutUntil) {
-            _pinError.value = "Muitas tentativas. Aguarde ${(lockoutUntil - now) / 1000 + 1} s"
+    fun createPin(pin: String, confirm: String, keyword: String) {
+        val error = validateNewPin(pin, confirm) ?: validateKeyword(keyword)
+        if (error != null) {
+            _pinError.value = error
             return
         }
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.Default) { pinManager.verify(pin) }
-            if (ok) {
-                unlock()
-            } else {
-                failedAttempts++
-                if (failedAttempts >= MAX_ATTEMPTS) {
-                    // 30 s, 60 s, 120 s... a cada nova falha depois do limite
-                    val wait = 30_000L shl (failedAttempts - MAX_ATTEMPTS).coerceAtMost(5)
-                    lockoutUntil = SystemClock.elapsedRealtime() + wait
-                    _pinError.value = "PIN incorreto. Aguarde ${wait / 1000} s"
-                } else {
-                    _pinError.value = "PIN incorreto"
-                }
+            withContext(Dispatchers.Default) {
+                pinManager.setPin(pin)
+                pinManager.setRecoveryKey(keyword)
             }
+            _hasRecoveryKey.value = true
+            unlock()
         }
     }
+
+    fun unlockWithPin(pin: String) =
+        verifyWithLimit(_pinError, "PIN incorreto", { pinManager.verify(pin) }) { unlock() }
 
     fun unlockWithBiometric() = unlock()
 
     private fun unlock() {
         failedAttempts = 0
         _pinError.value = null
+        _recoveryStep.value = RecoveryStep.None
         _lockState.value = LockState.Unlocked
     }
 
@@ -144,7 +147,137 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (_lockState.value != LockState.Unlocked) return
         _lockState.value = LockState.Locked
         _query.value = ""
+        _settingsDialog.value = null
+        if (_screen.value == Screen.Settings) _screen.value = Screen.List
         autoBiometricPending = true
+    }
+
+    // ---- Esqueci meu PIN ----
+
+    fun startRecovery() {
+        if (!pinManager.hasRecoveryKey()) {
+            _pinError.value = "Nenhuma palavra-chave cadastrada. Entre com a biometria e cadastre uma em Configurações"
+            return
+        }
+        _pinError.value = null
+        _recoveryStep.value = RecoveryStep.AskKeyword
+    }
+
+    fun cancelRecovery() {
+        _pinError.value = null
+        _recoveryStep.value = RecoveryStep.None
+    }
+
+    fun verifyRecoveryKey(keyword: String) =
+        verifyWithLimit(_pinError, "Palavra-chave incorreta", { pinManager.verifyRecoveryKey(keyword) }) {
+            _pinError.value = null
+            _recoveryStep.value = RecoveryStep.NewPin
+        }
+
+    fun resetPin(pin: String, confirm: String) {
+        // Só chega aqui depois de acertar a palavra-chave
+        if (_recoveryStep.value != RecoveryStep.NewPin) return
+        validateNewPin(pin, confirm)?.let {
+            _pinError.value = it
+            return
+        }
+        viewModelScope.launch {
+            withContext(Dispatchers.Default) { pinManager.setPin(pin) }
+            unlock()
+            _messages.send("PIN alterado")
+        }
+    }
+
+    // ---- Configurações ----
+
+    fun openSettings() {
+        _screen.value = Screen.Settings
+    }
+
+    fun closeSettings() {
+        _screen.value = Screen.List
+    }
+
+    fun openSettingsDialog(dialog: SettingsDialog) {
+        _dialogError.value = null
+        _settingsDialog.value = dialog
+    }
+
+    fun closeSettingsDialog() {
+        _dialogError.value = null
+        _settingsDialog.value = null
+    }
+
+    fun changePin(currentPin: String, newPin: String, confirm: String) {
+        validateNewPin(newPin, confirm)?.let {
+            _dialogError.value = it
+            return
+        }
+        verifyWithLimit(_dialogError, "PIN atual incorreto", { pinManager.verify(currentPin) }) {
+            viewModelScope.launch {
+                withContext(Dispatchers.Default) { pinManager.setPin(newPin) }
+                closeSettingsDialog()
+                _messages.send("PIN alterado")
+            }
+        }
+    }
+
+    fun changeRecoveryKey(currentPin: String, keyword: String) {
+        validateKeyword(keyword)?.let {
+            _dialogError.value = it
+            return
+        }
+        verifyWithLimit(_dialogError, "PIN atual incorreto", { pinManager.verify(currentPin) }) {
+            viewModelScope.launch {
+                withContext(Dispatchers.Default) { pinManager.setRecoveryKey(keyword) }
+                _hasRecoveryKey.value = true
+                closeSettingsDialog()
+                _messages.send("Palavra-chave alterada")
+            }
+        }
+    }
+
+    private fun validateNewPin(pin: String, confirm: String): String? = when {
+        pin.length !in 4..8 -> "O PIN deve ter de 4 a 8 dígitos"
+        pin != confirm -> "Os PINs não conferem"
+        else -> null
+    }
+
+    private fun validateKeyword(keyword: String): String? =
+        if (keyword.trim().length < 4) "A palavra-chave deve ter pelo menos 4 caracteres" else null
+
+    /**
+     * Confere um segredo (PIN ou palavra-chave) respeitando o limite de tentativas,
+     * que é o mesmo para tudo: errar a palavra-chave também conta.
+     */
+    private fun verifyWithLimit(
+        error: MutableStateFlow<String?>,
+        wrongMessage: String,
+        check: () -> Boolean,
+        onSuccess: () -> Unit,
+    ) {
+        val now = SystemClock.elapsedRealtime()
+        if (now < lockoutUntil) {
+            error.value = "Muitas tentativas. Aguarde ${(lockoutUntil - now) / 1000 + 1} s"
+            return
+        }
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.Default) { check() }
+            if (ok) {
+                failedAttempts = 0
+                onSuccess()
+                return@launch
+            }
+            failedAttempts++
+            if (failedAttempts >= MAX_ATTEMPTS) {
+                // 30 s, 60 s, 120 s... a cada nova falha depois do limite
+                val wait = 30_000L shl (failedAttempts - MAX_ATTEMPTS).coerceAtMost(5)
+                lockoutUntil = SystemClock.elapsedRealtime() + wait
+                error.value = "$wrongMessage. Aguarde ${wait / 1000} s"
+            } else {
+                error.value = wrongMessage
+            }
+        }
     }
 
     /** Abre a biometria sozinha uma vez por bloqueio (e não de novo se o usuário cancelar). */
@@ -155,7 +288,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun onAppBackgrounded() {
-        if (expectingExternalActivity) expectingExternalActivity = false else lock()
+        if (expectingExternalActivity) {
+            expectingExternalActivity = false
+            return
+        }
+        lock()
+        // Quem acertou a palavra-chave e saiu do app precisa acertar de novo
+        _recoveryStep.value = RecoveryStep.None
     }
 
     /** O seletor de arquivos tira o app da tela; não bloquear por causa dele. */

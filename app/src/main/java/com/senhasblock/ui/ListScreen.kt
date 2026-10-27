@@ -30,9 +30,9 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -81,7 +81,7 @@ fun ListScreen(
     onCopyPassword: (PasswordEntry) -> Unit,
     onExport: () -> Unit,
     onImport: () -> Unit,
-    onLock: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var toDelete by remember { mutableStateOf<PasswordEntry?>(null) }
@@ -91,7 +91,7 @@ fun ListScreen(
             TopAppBar(
                 title = { Text("Senhas Block") },
                 actions = {
-                    IconButton(onClick = onLock) { Icon(Icons.Filled.Lock, "Bloquear") }
+                    IconButton(onClick = onOpenSettings) { Icon(Icons.Filled.Settings, "Configurações") }
                     Box {
                         IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, "Mais opções") }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
